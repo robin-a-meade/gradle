@@ -66,6 +66,7 @@ import java.util.TreeSet;
 @NonNullApi
 public class DefaultTaskContainer extends DefaultTaskCollection<Task> implements TaskContainerInternal {
     private static final Object[] NO_ARGS = new Object[0];
+    private final static String EAGERLY_CREATE_LAZY_TASKS_PROPERTY = "org.gradle.internal.tasks.eager";
 
     private static final Set<String> VALID_TASK_ARGUMENTS = ImmutableSet.of(
         Task.TASK_ACTION, Task.TASK_DEPENDS_ON, Task.TASK_DESCRIPTION, Task.TASK_GROUP, Task.TASK_NAME, Task.TASK_OVERWRITE, Task.TASK_TYPE, Task.TASK_CONSTRUCTOR_ARGS
@@ -78,12 +79,16 @@ public class DefaultTaskContainer extends DefaultTaskCollection<Task> implements
     private final ITaskFactory taskFactory;
     private final ProjectAccessListener projectAccessListener;
     private final Set<String> placeholders = Sets.newHashSet();
+    private final TaskStatistics statistics;
+    private final boolean eagerlyCreateLazyTasks;
 
-    public DefaultTaskContainer(MutableModelNode modelNode, ProjectInternal project, Instantiator instantiator, ITaskFactory taskFactory, ProjectAccessListener projectAccessListener) {
+    public DefaultTaskContainer(MutableModelNode modelNode, ProjectInternal project, Instantiator instantiator, ITaskFactory taskFactory, ProjectAccessListener projectAccessListener, TaskStatistics statistics) {
         super(Task.class, instantiator, project);
         this.modelNode = modelNode;
         this.taskFactory = taskFactory;
         this.projectAccessListener = projectAccessListener;
+        this.statistics = statistics;
+        this.eagerlyCreateLazyTasks = Boolean.getBoolean(EAGERLY_CREATE_LAZY_TASKS_PROPERTY);
     }
 
     public Task create(Map<String, ?> options) {
@@ -105,6 +110,7 @@ public class DefaultTaskContainer extends DefaultTaskCollection<Task> implements
         Class<? extends TaskInternal> type = Cast.uncheckedCast(actualArgs.get(Task.TASK_TYPE));
         Object[] constructorArgs = getConstructorArgs(actualArgs);
         TaskInternal task = createTask(name, type, constructorArgs);
+        statistics.eagerTask(type);
 
         Object dependsOnTasks = actualArgs.get(Task.TASK_DEPENDS_ON);
         if (dependsOnTasks != null) {
@@ -216,6 +222,7 @@ public class DefaultTaskContainer extends DefaultTaskCollection<Task> implements
     @Override
     public <T extends Task> T create(String name, Class<T> type, Object... constructorArgs) throws InvalidUserDataException {
         T task = createTask(name, type, constructorArgs);
+        statistics.eagerTask(type);
         return addTask(task, false);
     }
 
@@ -272,6 +279,9 @@ public class DefaultTaskContainer extends DefaultTaskCollection<Task> implements
         }
         TaskProvider<T> provider = new TaskCreatingProvider<T>(type, name, configurationAction);
         addLater(provider);
+        if (eagerlyCreateLazyTasks) {
+            provider.get();
+        }
         return provider;
     }
 
@@ -484,6 +494,7 @@ public class DefaultTaskContainer extends DefaultTaskCollection<Task> implements
         public TaskCreatingProvider(Class<T> type, String name, Action<? super T> configureAction) {
             super(type, name);
             this.configureAction = configureAction;
+            statistics.lazyTask();
         }
 
         @Override
@@ -492,6 +503,7 @@ public class DefaultTaskContainer extends DefaultTaskCollection<Task> implements
                 task = type.cast(findByNameWithoutRules(name));
                 if (task == null) {
                     task = createTask(name, type, NO_ARGS);
+                    statistics.lazyTaskRealized();
                     add(task);
                     configureAction.execute(task);
                     configureAction = null;
